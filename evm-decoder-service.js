@@ -1,5 +1,5 @@
-const { Client } = require('pg');
-const { ethers } = require('ethers');
+const {Client} = require('pg');
+const {ethers} = require('ethers');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -12,11 +12,11 @@ dotenv.config();
 const config = {
   // PostgreSQL connection
   database: {
-    host: process.env.DB_HOST || 'db',
+    host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT || '5432'),
     user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASS || 'postgres',
-    database: process.env.DB_NAME || 'ingest',
+    password: process.env.DB_PASSWORD || 'password',
+    database: process.env.DB_NAME || 'blockchain_db',
   },
   // ABI sources
   abis: {
@@ -40,6 +40,7 @@ class EVMLogDecoderService {
     this.abiCache = new Map();
     this.interfaceCache = new Map();
     this.isRunning = false;
+    this.isProcessing = false; // Flag to prevent concurrent processing
 
     // Log configuration on startup
     console.log('Starting EVM Log Decoder with configuration:');
@@ -59,13 +60,14 @@ class EVMLogDecoderService {
   // Initialize the service
   async init() {
     try {
+      // Load all ABIs
+      await this.loadAbis();
+
+      // Connect DB
       await this.client.connect();
 
       // Create logs table if it doesn't exist
       await this.createLogsTableIfNotExists();
-
-      // Load all ABIs
-      await this.loadAbis();
 
       console.log('EVM Log Decoder Service initialized');
     } catch (error) {
@@ -77,21 +79,32 @@ class EVMLogDecoderService {
   // Create logs table if it doesn't exist
   async createLogsTableIfNotExists() {
     const createTableQuery = `
-      CREATE TABLE IF NOT EXISTS logs (
-        id SERIAL PRIMARY KEY,
-        event_id INTEGER UNIQUE REFERENCES event(id),
-        block_number BIGINT,
-        transaction_hash TEXT,
-        log_index INTEGER,
-        address TEXT,
-        event_name TEXT,
-        decoded_data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_logs_block_number ON logs(block_number);
-      CREATE INDEX IF NOT EXISTS idx_logs_address ON logs(address);
-      CREATE INDEX IF NOT EXISTS idx_logs_event_name ON logs(event_name);
+        CREATE TABLE IF NOT EXISTS logs
+        (
+            id
+            SERIAL
+            PRIMARY
+            KEY,
+            event_id
+            INTEGER
+            UNIQUE
+            REFERENCES
+            event
+        (
+            id
+        ),
+            block_number BIGINT,
+            transaction_hash TEXT,
+            log_index INTEGER,
+            address TEXT,
+            event_name TEXT,
+            decoded_data JSONB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+        CREATE INDEX IF NOT EXISTS idx_logs_block_number ON logs(block_number);
+        CREATE INDEX IF NOT EXISTS idx_logs_address ON logs(address);
+        CREATE INDEX IF NOT EXISTS idx_logs_event_name ON logs(event_name);
     `;
 
     await this.client.query(createTableQuery);
@@ -231,7 +244,7 @@ class EVMLogDecoderService {
     }
   }
 
-  // Add ABI to cache and create interface
+// Add ABI to cache and create interface
   async addAbiToCache(contractName, abi) {
     try {
       // Skip if no abi or already cached
@@ -240,8 +253,8 @@ class EVMLogDecoderService {
       // Store ABI in cache
       this.abiCache.set(contractName, abi);
 
-      // Create interface
-      const iface = new ethers.Interface(abi);
+      // Create interface using ethers v5 syntax
+      const iface = new ethers.utils.Interface(abi);
       this.interfaceCache.set(contractName, iface);
 
       console.log(`Loaded ABI for ${contractName}`);
@@ -262,9 +275,15 @@ class EVMLogDecoderService {
     // Schedule periodic processing
     setInterval(async () => {
       try {
-        await this.processEvents();
+        // Only start processing if we're not already processing events
+        if (!this.isProcessing) {
+          await this.processEvents();
+        } else {
+          console.log('Skipping process cycle - previous cycle still in progress');
+        }
       } catch (error) {
         console.error('Error processing events:', error);
+        this.isProcessing = false; // Reset flag in case of error
       }
     }, config.processing.interval);
 
@@ -276,51 +295,64 @@ class EVMLogDecoderService {
 
   // Process a batch of events
   async processEvents() {
-    console.log('Processing events...');
-
-    let lastProcessedId = 0;
-    let totalProcessed = 0;
-
-    while (true) {
-      const query = `
-        SELECT e.id, e.data, e.block_number
-        FROM event e
-        LEFT JOIN logs l ON e.id = l.event_id
-        WHERE e.name = 'EVM.Log'
-        AND l.id IS NULL
-        AND e.id > $1
-        ORDER BY e.block_number ASC, e.id ASC
-        LIMIT $2
-      `;
-
-      const result = await this.client.query(query, [lastProcessedId, config.processing.batchSize]);
-
-      if (result.rows.length === 0) {
-        break;
-      }
-
-      for (const row of result.rows) {
-        try {
-          await this.decodeAndStoreEvent(row);
-          lastProcessedId = row.id;
-          totalProcessed++;
-        } catch (error) {
-          console.error(`Error processing event id ${row.id}:`, error);
-        }
-      }
-
-      console.log(`Processed ${result.rows.length} events`);
-
-      // If we processed less than the batch size, we're done for now
-      if (result.rows.length < config.processing.batchSize) {
-        break;
-      }
-
-      // Sleep between batches to avoid overloading the database
-      await new Promise(resolve => setTimeout(resolve, config.processing.sleepTime));
+    // Prevent concurrent processing
+    if (this.isProcessing) {
+      console.log('Already processing events, skipping this cycle');
+      return;
     }
 
-    console.log(`Total events processed in this run: ${totalProcessed}`);
+    this.isProcessing = true;
+    console.log('Processing events...');
+
+    try {
+      let lastProcessedId = 0;
+      let totalProcessed = 0;
+
+      while (true) {
+        const query = `
+            SELECT e.id, e.data, e.block_number
+            FROM event e
+                     LEFT JOIN logs l ON e.id = l.event_id
+            WHERE e.name = 'EVM.Log'
+              AND l.id IS NULL
+              AND e.id > $1
+            ORDER BY e.block_number ASC, e.id ASC
+                LIMIT $2
+        `;
+
+        const result = await this.client.query(query, [lastProcessedId, config.processing.batchSize]);
+
+        if (result.rows.length === 0) {
+          break;
+        }
+
+        for (const row of result.rows) {
+          try {
+            await this.decodeAndStoreEvent(row);
+            lastProcessedId = row.id;
+            totalProcessed++;
+          } catch (error) {
+            console.error(`Error processing event id ${row.id}:`, error);
+          }
+        }
+
+        console.log(`Processed ${result.rows.length} events`);
+
+        // If no events were processed, we're done
+        if (result.rows.length === 0) {
+          break;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, config.processing.sleepTime));
+      }
+
+      console.log(`Total events processed in this run: ${totalProcessed}`);
+    } catch (error) {
+      console.error('Error in process events:', error);
+    } finally {
+      // Always release the processing lock when done
+      this.isProcessing = false;
+    }
   }
 
   // Decode and store a single event
@@ -478,16 +510,15 @@ class EVMLogDecoderService {
     decodedData
   ) {
     const query = `
-      INSERT INTO logs (
-        event_id, block_number, transaction_hash, log_index, address, event_name, decoded_data
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-      ON CONFLICT (event_id) DO UPDATE SET
-        block_number = EXCLUDED.block_number,
-        transaction_hash = EXCLUDED.transaction_hash,
-        log_index = EXCLUDED.log_index,
-        address = EXCLUDED.address,
-        event_name = EXCLUDED.event_name,
-        decoded_data = EXCLUDED.decoded_data
+        INSERT INTO logs (event_id, block_number, transaction_hash, log_index, address, event_name, decoded_data)
+        VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (event_id) DO
+        UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            log_index = EXCLUDED.log_index,
+            address = EXCLUDED.address,
+            event_name = EXCLUDED.event_name,
+            decoded_data = EXCLUDED.decoded_data
     `;
 
     const values = [
@@ -510,16 +541,14 @@ class EVMLogDecoderService {
     eventData
   ) {
     const query = `
-      INSERT INTO logs (
-        event_id, block_number, decoded_data
-      ) VALUES ($1, $2, $3)
-      ON CONFLICT (event_id) DO NOTHING
+        INSERT INTO logs (event_id, block_number, decoded_data)
+        VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING
     `;
 
     const values = [
       eventId,
       blockNumber,
-      JSON.stringify({ unparsed: true, raw: eventData })
+      JSON.stringify({unparsed: true, raw: eventData})
     ];
 
     await this.client.query(query, values);
