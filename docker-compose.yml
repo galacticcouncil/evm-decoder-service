@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  evm-log-decoder:
+    image: galacticcouncil/evm-log-decoder-service:latest
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASS=postgres
+      - DB_NAME=ingest
+      - ABI_URLS=
+      - ABI_DIR=/app/abis
+      - BATCH_SIZE=100
+      - SLEEP_TIME=1000
+      - PROCESS_INTERVAL=60000
