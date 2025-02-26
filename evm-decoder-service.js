@@ -1,5 +1,5 @@
-const {Client} = require('pg');
-const {ethers} = require('ethers');
+const { Client } = require('pg');
+const { ethers } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -79,20 +79,9 @@ class EVMLogDecoderService {
   // Create logs table if it doesn't exist
   async createLogsTableIfNotExists() {
     const createTableQuery = `
-        CREATE TABLE IF NOT EXISTS logs
-        (
-            id
-            SERIAL
-            PRIMARY
-            KEY,
-            event_id
-            INTEGER
-            UNIQUE
-            REFERENCES
-            event
-        (
-            id
-        ),
+        CREATE TABLE IF NOT EXISTS logs (
+                                            id SERIAL PRIMARY KEY,
+                                            event_id CHARACTER(23) UNIQUE REFERENCES event(id),
             block_number BIGINT,
             transaction_hash TEXT,
             log_index INTEGER,
@@ -244,7 +233,7 @@ class EVMLogDecoderService {
     }
   }
 
-// Add ABI to cache and create interface
+  // Add ABI to cache and create interface
   async addAbiToCache(contractName, abi) {
     try {
       // Skip if no abi or already cached
@@ -305,18 +294,18 @@ class EVMLogDecoderService {
     console.log('Processing events...');
 
     try {
-      let lastProcessedId = 0;
+      let lastProcessedId = '';
       let totalProcessed = 0;
 
       while (true) {
         const query = `
-            SELECT e.id, e.data, e.block_number
+            SELECT e.id, e.args as data, e.block_id
             FROM event e
                      LEFT JOIN logs l ON e.id = l.event_id
             WHERE e.name = 'EVM.Log'
               AND l.id IS NULL
               AND e.id > $1
-            ORDER BY e.block_number ASC, e.id ASC
+            ORDER BY e.block_id ASC, e.id ASC
                 LIMIT $2
         `;
 
@@ -363,7 +352,7 @@ class EVMLogDecoderService {
 
       if (!eventData) {
         // If we can't parse the event data, store it as unparsed
-        await this.storeUnparsedEvent(event.id, event.block_number, eventData);
+        await this.storeUnparsedEvent(event.id, event.block_id, eventData);
         return;
       }
 
@@ -374,7 +363,7 @@ class EVMLogDecoderService {
         // Store decoded event
         await this.storeDecodedEvent(
           event.id,
-          event.block_number,
+          event.block_id,
           eventData.transactionHash,
           eventData.logIndex,
           eventData.address,
@@ -382,12 +371,12 @@ class EVMLogDecoderService {
         );
       } else {
         // Store as unparsed
-        await this.storeUnparsedEvent(event.id, event.block_number, eventData);
+        await this.storeUnparsedEvent(event.id, event.block_id, eventData);
       }
     } catch (error) {
       console.error(`Failed to decode event ${event.id}:`, error);
       // Store as unparsed to avoid reprocessing
-      await this.storeUnparsedEvent(event.id, event.block_number, null);
+      await this.storeUnparsedEvent(event.id, event.block_id, null);
     }
   }
 
@@ -503,23 +492,27 @@ class EVMLogDecoderService {
   // Store decoded event in the logs table
   async storeDecodedEvent(
     eventId,
-    blockNumber,
+    blockId,
     transactionHash,
     logIndex,
     address,
     decodedData
   ) {
     const query = `
-        INSERT INTO logs (event_id, block_number, transaction_hash, log_index, address, event_name, decoded_data)
-        VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (event_id) DO
-        UPDATE SET
+        INSERT INTO logs (
+            event_id, block_number, transaction_hash, log_index, address, event_name, decoded_data
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (event_id) DO UPDATE SET
             block_number = EXCLUDED.block_number,
-            transaction_hash = EXCLUDED.transaction_hash,
-            log_index = EXCLUDED.log_index,
-            address = EXCLUDED.address,
-            event_name = EXCLUDED.event_name,
-            decoded_data = EXCLUDED.decoded_data
+                                          transaction_hash = EXCLUDED.transaction_hash,
+                                          log_index = EXCLUDED.log_index,
+                                          address = EXCLUDED.address,
+                                          event_name = EXCLUDED.event_name,
+                                          decoded_data = EXCLUDED.decoded_data
     `;
+
+    // Convert blockId (which is a character type) to a number for the block_number field
+    const blockNumber = this.extractBlockNumber(blockId);
 
     const values = [
       eventId,
@@ -534,21 +527,42 @@ class EVMLogDecoderService {
     await this.client.query(query, values);
   }
 
+  // Extract numeric block number from block_id string
+  extractBlockNumber(blockId) {
+    try {
+      // Try to extract the numeric part of the block ID
+      // Assuming format like 'block-123456-789' or similar
+      const matches = blockId.match(/\d+/g);
+      if (matches && matches.length > 0) {
+        return parseInt(matches[0], 10);
+      }
+      return 0; // Fallback value
+    } catch (error) {
+      console.error(`Error extracting block number from ${blockId}:`, error);
+      return 0; // Fallback value on error
+    }
+  }
+
   // Store unparsed event to avoid reprocessing
   async storeUnparsedEvent(
     eventId,
-    blockNumber,
+    blockId,
     eventData
   ) {
     const query = `
-        INSERT INTO logs (event_id, block_number, decoded_data)
-        VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING
+      INSERT INTO logs (
+        event_id, block_number, decoded_data
+      ) VALUES ($1, $2, $3)
+      ON CONFLICT (event_id) DO NOTHING
     `;
+
+    // Convert blockId to number
+    const blockNumber = this.extractBlockNumber(blockId);
 
     const values = [
       eventId,
       blockNumber,
-      JSON.stringify({unparsed: true, raw: eventData})
+      JSON.stringify({ unparsed: true, raw: eventData })
     ];
 
     await this.client.query(query, values);
