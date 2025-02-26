@@ -83,17 +83,16 @@ class EVMLogDecoderService {
                                             id SERIAL PRIMARY KEY,
                                             event_id CHARACTER(23) UNIQUE REFERENCES event(id),
             block_number BIGINT,
-            transaction_hash TEXT,
-            log_index INTEGER,
             address TEXT,
             event_name TEXT,
-            decoded_data JSONB,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            abi TEXT,
+            args JSONB
             );
 
         CREATE INDEX IF NOT EXISTS idx_logs_block_number ON logs(block_number);
         CREATE INDEX IF NOT EXISTS idx_logs_address ON logs(address);
         CREATE INDEX IF NOT EXISTS idx_logs_event_name ON logs(event_name);
+        CREATE INDEX IF NOT EXISTS idx_logs_abi ON logs(abi);
     `;
 
     await this.client.query(createTableQuery);
@@ -299,7 +298,7 @@ class EVMLogDecoderService {
 
       while (true) {
         const query = `
-            SELECT e.id, e.args as data, e.block_id
+            SELECT e.id, e.args, e.block_id
             FROM event e
                      LEFT JOIN logs l ON e.id = l.event_id
             WHERE e.name = 'EVM.Log'
@@ -347,31 +346,32 @@ class EVMLogDecoderService {
   // Decode and store a single event
   async decodeAndStoreEvent(event) {
     try {
-      // Parse the event data
-      const eventData = this.parseEventData(event.data);
+      // The event.args field contains the log data we need to decode
+      // This could be a string that needs parsing or an already parsed object
+      const logData = this.parseEventData(event.args);
 
-      if (!eventData) {
-        // If we can't parse the event data, store it as unparsed
-        await this.storeUnparsedEvent(event.id, event.block_id, eventData);
+      if (!logData) {
+        // If we can't parse the log data, store it as unparsed
+        await this.storeUnparsedEvent(event.id, event.block_id, null);
         return;
       }
 
       // Try to decode using all available ABIs
-      const decodedData = await this.tryDecodeWithAllAbis(eventData);
+      const decodedData = await this.tryDecodeWithAllAbis(logData);
 
       if (decodedData) {
-        // Store decoded event
+        // Store decoded event (we no longer need transaction_hash and log_index)
         await this.storeDecodedEvent(
           event.id,
           event.block_id,
-          eventData.transactionHash,
-          eventData.logIndex,
-          eventData.address,
+          null, // transactionHash no longer used
+          null, // logIndex no longer used
+          logData.address,
           decodedData
         );
       } else {
         // Store as unparsed
-        await this.storeUnparsedEvent(event.id, event.block_id, eventData);
+        await this.storeUnparsedEvent(event.id, event.block_id, typeof event.args === 'string' ? JSON.parse(event.args) : event.args);
       }
     } catch (error) {
       console.error(`Failed to decode event ${event.id}:`, error);
@@ -380,20 +380,45 @@ class EVMLogDecoderService {
     }
   }
 
-  // Parse raw event data
-  parseEventData(data) {
+  // Parse raw event data (from args field)
+  parseEventData(rawEventData) {
     try {
       // Handle string or object data
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const eventArgs = typeof rawEventData === 'string' ? JSON.parse(rawEventData) : rawEventData;
 
-      // Extract relevant fields
+      // For EVM.Log events, the structure is:
+      // {
+      //   "log": {
+      //     "data": "0x...",
+      //     "topics": ["0x...", ...],
+      //     "address": "0x..."
+      //   }
+      //   // ... possibly other fields
+      // }
+
+      // Check if we have the log field
+      if (!eventArgs || !eventArgs.log) {
+        console.error('Event data missing log field:', eventArgs);
+        return null;
+      }
+
+      const log = eventArgs.log;
+
+      // Validate that we have the required fields for an EVM log
+      if (!log.topics || !log.address) {
+        console.error('Log data missing required fields:', log);
+        return null;
+      }
+
+      // Extract and return the fields needed for log decoding
+      // Note: Some fields might be in the parent object and not in the log object
       return {
-        address: parsedData.address?.toLowerCase(),
-        topics: parsedData.topics,
-        data: parsedData.data,
-        blockNumber: parsedData.blockNumber,
-        transactionHash: parsedData.transactionHash,
-        logIndex: parsedData.logIndex
+        address: log.address?.toLowerCase(),
+        topics: log.topics,
+        data: log.data,
+        blockNumber: eventArgs.blockNumber,
+        transactionHash: eventArgs.transactionHash,
+        logIndex: eventArgs.logIndex
       };
     } catch (error) {
       console.error('Failed to parse event data:', error);
@@ -412,53 +437,41 @@ class EVMLogDecoderService {
     // Try each interface
     for (const [contractName, iface] of this.interfaceCache.entries()) {
       try {
-        // Get all event fragments
-        for (const eventFragment of Object.values(iface.events)) {
-          try {
-            // Check if topic matches event signature
-            if (iface.getEvent(firstTopic)) {
-              // Decode the log
-              const log = {
-                topics: eventData.topics,
-                data: eventData.data,
-                address: eventData.address
-              };
+        // Check if this interface can decode the log
+        if (iface.getEvent(firstTopic)) {
+          // Create the log object expected by ethers
+          const log = {
+            topics: eventData.topics,
+            data: eventData.data,
+            address: eventData.address
+          };
 
-              const decodedLog = iface.parseLog(log);
+          // Attempt to decode with this interface
+          const decodedLog = iface.parseLog(log);
 
-              // Return the decoded data
-              return {
-                contractName,
-                eventName: decodedLog.name,
-                args: this.argsToObject(decodedLog.args)
-              };
-            }
-          } catch (error) {
-            // Skip errors, try next event fragment
-          }
+          // Return the decoded data
+          return {
+            contractName,
+            eventName: decodedLog.name,
+            args: decodedLog.args
+          };
         }
       } catch (error) {
         // Skip errors, try next interface
+        continue;
       }
     }
 
     return null;
   }
 
-  // Convert array-like args to object
-  argsToObject(args) {
+  // Convert array-like args to object with only named args
+  getNamedArgs(args) {
     const result = {};
 
-    // Handle numbered arguments
-    for (let i = 0; i < Object.keys(args).length; i++) {
-      if (args[i] !== undefined) {
-        const value = args[i];
-        result[i] = this.formatValue(value);
-      }
-    }
-
-    // Handle named arguments
+    // Only include named arguments (skip numbered ones)
     for (const key of Object.keys(args)) {
+      // Check if the key is not a number
       if (isNaN(Number(key))) {
         const value = args[key];
         result[key] = this.formatValue(value);
@@ -500,28 +513,29 @@ class EVMLogDecoderService {
   ) {
     const query = `
         INSERT INTO logs (
-            event_id, block_number, transaction_hash, log_index, address, event_name, decoded_data
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            event_id, block_number, address, event_name, abi, args
+        ) VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (event_id) DO UPDATE SET
             block_number = EXCLUDED.block_number,
-                                          transaction_hash = EXCLUDED.transaction_hash,
-                                          log_index = EXCLUDED.log_index,
                                           address = EXCLUDED.address,
                                           event_name = EXCLUDED.event_name,
-                                          decoded_data = EXCLUDED.decoded_data
+                                          abi = EXCLUDED.abi,
+                                          args = EXCLUDED.args
     `;
 
     // Convert blockId (which is a character type) to a number for the block_number field
     const blockNumber = this.extractBlockNumber(blockId);
 
+    // Get only named arguments (no numbered fields)
+    const namedArgs = this.getNamedArgs(decodedData.args);
+
     const values = [
       eventId,
       blockNumber,
-      transactionHash,
-      logIndex,
       address,
       decodedData.eventName,
-      JSON.stringify(decodedData)
+      decodedData.contractName, // Store contract name as ABI identifier
+      JSON.stringify(namedArgs)  // Store only named arguments
     ];
 
     await this.client.query(query, values);
@@ -550,10 +564,10 @@ class EVMLogDecoderService {
     eventData
   ) {
     const query = `
-      INSERT INTO logs (
-        event_id, block_number, decoded_data
-      ) VALUES ($1, $2, $3)
-      ON CONFLICT (event_id) DO NOTHING
+        INSERT INTO logs (
+            event_id, block_number, args
+        ) VALUES ($1, $2, $3)
+            ON CONFLICT (event_id) DO NOTHING
     `;
 
     // Convert blockId to number
@@ -576,8 +590,153 @@ class EVMLogDecoderService {
   }
 }
 
+// Test decoder with sample events from CSV
+async function testWithSampleEvents(csvPath) {
+  console.log(`Testing decoder with sample events from ${csvPath}`);
+
+  // Create service instance
+  const service = new EVMLogDecoderService();
+
+  try {
+    // Initialize service
+    await service.init();
+
+    // Load test data from CSV
+    const Papa = require('papaparse');
+    const fs = require('fs');
+
+    const csvContent = fs.readFileSync(csvPath, 'utf8');
+    let testEvents = [];
+
+    await new Promise((resolve, reject) => {
+      Papa.parse(csvContent, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          testEvents = results.data;
+          console.log(`Loaded ${testEvents.length} test events`);
+          resolve();
+        },
+        error: (error) => {
+          console.error('Failed to parse CSV:', error);
+          reject(error);
+        }
+      });
+    });
+
+    // Track test results
+    const results = {
+      total: testEvents.length,
+      evmLogs: 0,
+      decoded: 0,
+      failed: 0,
+      details: []
+    };
+
+    // Process each event
+    for (const event of testEvents) {
+      try {
+        // Only process EVM.Log events
+        if (event.name !== 'EVM.Log') {
+          continue;
+        }
+
+        results.evmLogs++;
+
+        // Use the service's parseEventData method directly on the args field
+        const eventData = service.parseEventData(event.args);
+
+        if (!eventData) {
+          results.failed++;
+          results.details.push({
+            id: event.id,
+            success: false,
+            error: 'Event data missing required fields or malformed'
+          });
+          continue;
+        }
+
+        // Try to decode
+        const decodedData = await service.tryDecodeWithAllAbis(eventData);
+
+        if (decodedData) {
+          results.decoded++;
+          results.details.push({
+            id: event.id,
+            blockId: event.block_id,
+            success: true,
+            decodedData
+          });
+        } else {
+          results.failed++;
+          results.details.push({
+            id: event.id,
+            blockId: event.block_id,
+            success: false,
+            error: 'Could not decode with any ABI'
+          });
+        }
+      } catch (error) {
+        results.failed++;
+        results.details.push({
+          id: event.id,
+          blockId: event.block_id,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+
+    // Print results
+    console.log('\n===== Test Results =====');
+    console.log(`Total events: ${results.total}`);
+    console.log(`EVM.Log events: ${results.evmLogs}`);
+    console.log(`Successfully decoded: ${results.decoded}`);
+    console.log(`Failed to decode: ${results.failed}`);
+
+    if (results.evmLogs > 0) {
+      const successRate = (results.decoded / results.evmLogs) * 100;
+      console.log(`Success rate: ${successRate.toFixed(2)}%`);
+
+      if (successRate >= 90) {
+        console.log('✅ TEST PASSED (>= 90% success rate)');
+      } else {
+        console.log('❌ TEST FAILED (< 90% success rate)');
+      }
+    }
+
+    // Save detailed results to file
+    fs.writeFileSync(
+      'test-results.json',
+      JSON.stringify(results, null, 2)
+    );
+
+    console.log(`Detailed results saved to test-results.json`);
+
+    return results;
+  } catch (error) {
+    console.error('Test failed:', error);
+    throw error;
+  } finally {
+    // Stop service
+    await service.stop();
+  }
+}
+
 // Main function to run the service
 async function main() {
+  // Check if running in test mode
+  const testArg = process.argv.find(arg => arg.startsWith('--test='));
+
+  if (testArg) {
+    const csvPath = testArg.split('=')[1];
+    await testWithSampleEvents(csvPath);
+    process.exit(0);
+    return;
+  }
+
+  // Normal operation
   const service = new EVMLogDecoderService();
 
   try {
@@ -602,5 +761,13 @@ async function main() {
   }
 }
 
-// Run the service
-main();
+// Export for testing
+module.exports = { EVMLogDecoderService, testWithSampleEvents };
+
+// If script is run directly (not imported)
+if (require.main === module) {
+  main().catch(error => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
+}
