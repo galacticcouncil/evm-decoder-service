@@ -12,11 +12,11 @@ dotenv.config();
 const config = {
   // PostgreSQL connection
   database: {
-    host: process.env.DB_HOST || 'localhost',
+    host: process.env.DB_HOST || 'db',
     port: parseInt(process.env.DB_PORT || '5432'),
     user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'password',
-    database: process.env.DB_NAME || 'blockchain_db',
+    password: process.env.DB_PASS || 'postgres',
+    database: process.env.DB_NAME || 'ingest',
   },
   // ABI sources
   abis: {
