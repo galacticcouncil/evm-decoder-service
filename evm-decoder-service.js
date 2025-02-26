@@ -27,9 +27,9 @@ const config = {
   },
   // Processing configuration
   processing: {
-    batchSize: parseInt(process.env.BATCH_SIZE || '100'),
-    sleepTime: parseInt(process.env.SLEEP_TIME || '1000'),
-    interval: parseInt(process.env.PROCESS_INTERVAL || '60000'),
+    batchSize: parseInt(process.env.BATCH_SIZE || '1000'),
+    sleepTime: parseInt(process.env.SLEEP_TIME || '100'),
+    interval: parseInt(process.env.PROCESS_INTERVAL || '5000'),
   },
 };
 
@@ -266,8 +266,6 @@ class EVMLogDecoderService {
         // Only start processing if we're not already processing events
         if (!this.isProcessing) {
           await this.processEvents();
-        } else {
-          console.log('Skipping process cycle - previous cycle still in progress');
         }
       } catch (error) {
         console.error('Error processing events:', error);
@@ -285,12 +283,11 @@ class EVMLogDecoderService {
   async processEvents() {
     // Prevent concurrent processing
     if (this.isProcessing) {
-      console.log('Already processing events, skipping this cycle');
       return;
     }
 
     this.isProcessing = true;
-    console.log('Processing events...');
+    const { batchSize } = config.processing;
 
     try {
       let lastProcessedId = '';
@@ -308,7 +305,7 @@ class EVMLogDecoderService {
                 LIMIT $2
         `;
 
-        const result = await this.client.query(query, [lastProcessedId, config.processing.batchSize]);
+        const result = await this.client.query(query, [lastProcessedId, batchSize]);
 
         if (result.rows.length === 0) {
           break;
@@ -334,7 +331,9 @@ class EVMLogDecoderService {
         await new Promise(resolve => setTimeout(resolve, config.processing.sleepTime));
       }
 
-      console.log(`Total events processed in this run: ${totalProcessed}`);
+      if (totalProcessed > batchSize) {
+        console.log(`Total events processed in this run: ${totalProcessed}`);
+      }
     } catch (error) {
       console.error('Error in process events:', error);
     } finally {
@@ -458,7 +457,6 @@ class EVMLogDecoderService {
         }
       } catch (error) {
         // Skip errors, try next interface
-        continue;
       }
     }
 
