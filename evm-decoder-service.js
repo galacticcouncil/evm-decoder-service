@@ -588,152 +588,8 @@ class EVMLogDecoderService {
   }
 }
 
-// Test decoder with sample events from CSV
-async function testWithSampleEvents(csvPath) {
-  console.log(`Testing decoder with sample events from ${csvPath}`);
-
-  // Create service instance
-  const service = new EVMLogDecoderService();
-
-  try {
-    // Initialize service
-    await service.init();
-
-    // Load test data from CSV
-    const Papa = require('papaparse');
-    const fs = require('fs');
-
-    const csvContent = fs.readFileSync(csvPath, 'utf8');
-    let testEvents = [];
-
-    await new Promise((resolve, reject) => {
-      Papa.parse(csvContent, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          testEvents = results.data;
-          console.log(`Loaded ${testEvents.length} test events`);
-          resolve();
-        },
-        error: (error) => {
-          console.error('Failed to parse CSV:', error);
-          reject(error);
-        }
-      });
-    });
-
-    // Track test results
-    const results = {
-      total: testEvents.length,
-      evmLogs: 0,
-      decoded: 0,
-      failed: 0,
-      details: []
-    };
-
-    // Process each event
-    for (const event of testEvents) {
-      try {
-        // Only process EVM.Log events
-        if (event.name !== 'EVM.Log') {
-          continue;
-        }
-
-        results.evmLogs++;
-
-        // Use the service's parseEventData method directly on the args field
-        const eventData = service.parseEventData(event.args);
-
-        if (!eventData) {
-          results.failed++;
-          results.details.push({
-            id: event.id,
-            success: false,
-            error: 'Event data missing required fields or malformed'
-          });
-          continue;
-        }
-
-        // Try to decode
-        const decodedData = await service.tryDecodeWithAllAbis(eventData);
-
-        if (decodedData) {
-          results.decoded++;
-          results.details.push({
-            id: event.id,
-            blockId: event.block_id,
-            success: true,
-            decodedData
-          });
-        } else {
-          results.failed++;
-          results.details.push({
-            id: event.id,
-            blockId: event.block_id,
-            success: false,
-            error: 'Could not decode with any ABI'
-          });
-        }
-      } catch (error) {
-        results.failed++;
-        results.details.push({
-          id: event.id,
-          blockId: event.block_id,
-          success: false,
-          error: error.message
-        });
-      }
-    }
-
-    // Print results
-    console.log('\n===== Test Results =====');
-    console.log(`Total events: ${results.total}`);
-    console.log(`EVM.Log events: ${results.evmLogs}`);
-    console.log(`Successfully decoded: ${results.decoded}`);
-    console.log(`Failed to decode: ${results.failed}`);
-
-    if (results.evmLogs > 0) {
-      const successRate = (results.decoded / results.evmLogs) * 100;
-      console.log(`Success rate: ${successRate.toFixed(2)}%`);
-
-      if (successRate >= 90) {
-        console.log('✅ TEST PASSED (>= 90% success rate)');
-      } else {
-        console.log('❌ TEST FAILED (< 90% success rate)');
-      }
-    }
-
-    // Save detailed results to file
-    fs.writeFileSync(
-      'test-results.json',
-      JSON.stringify(results, null, 2)
-    );
-
-    console.log(`Detailed results saved to test-results.json`);
-
-    return results;
-  } catch (error) {
-    console.error('Test failed:', error);
-    throw error;
-  } finally {
-    // Stop service
-    await service.stop();
-  }
-}
-
 // Main function to run the service
 async function main() {
-  // Check if running in test mode
-  const testArg = process.argv.find(arg => arg.startsWith('--test='));
-
-  if (testArg) {
-    const csvPath = testArg.split('=')[1];
-    await testWithSampleEvents(csvPath);
-    process.exit(0);
-    return;
-  }
-
   // Normal operation
   const service = new EVMLogDecoderService();
 
@@ -760,7 +616,7 @@ async function main() {
 }
 
 // Export for testing
-module.exports = { EVMLogDecoderService, testWithSampleEvents };
+module.exports = { EVMLogDecoderService };
 
 // If script is run directly (not imported)
 if (require.main === module) {
