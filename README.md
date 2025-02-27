@@ -1,111 +1,86 @@
-# EVM Log Decoder Service
+# EVM Decoder Service
 
-A service that periodically decodes Ethereum Virtual Machine (EVM) logs from a PostgreSQL database and stores the decoded data in a new table.
+This service decodes EVM data in Firesquid archive database.
 
 ## Features
 
-- Fetches and decodes EVM.Log events from a PostgreSQL database
-- Loads ABIs from URLs (configurable via environment variables)
-- Processes events in batches, ordered by block number
-- Stores decoded events with references to original event IDs
-- Docker and Docker Swarm ready deployment
+- Loads ABIs from URLs and local files
+- Processes EVM logs in batches
+- Decodes logs using ethers.js
+- Stores results in PostgreSQL database
 
-## Configuration
+## Setup
 
-The service is configured using environment variables:
+### Prerequisites
 
-### Database Configuration
-- `DB_HOST`: PostgreSQL host (default: 'localhost')
-- `DB_PORT`: PostgreSQL port (default: 5432)
-- `DB_USER`: PostgreSQL user (default: 'postgres')
-- `DB_PASSWORD`: PostgreSQL password (default: 'password')
-- `DB_NAME`: PostgreSQL database name (default: 'blockchain_db')
+- Node.js (v14+)
+- PostgreSQL database with Firesquid data
 
-### ABI Configuration
-- `ABI_URLS`: Comma-separated list of URLs to fetch ABIs from
-- `ABI_DIR`: Directory for local ABI files (default: './abis')
+### Installation
 
-### Processing Configuration
-- `BATCH_SIZE`: Number of events to process in each batch (default: 100)
-- `SLEEP_TIME`: Time to sleep between batches in ms (default: 1000)
-- `PROCESS_INTERVAL`: Service run interval in ms (default: 60000)
+```bash
+# Install dependencies
+npm install
+```
+
+### Configuration
+
+Create a `.env` file with the following variables:
+
+```
+# Database configuration
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASS=postgres
+DB_NAME=ingest
+
+# ABI sources
+ABI_URLS=https://example.com/abi1.json,https://example.com/abi2.json
+ABI_DIR=./abis
+
+# Processing configuration
+BATCH_SIZE=1000
+SLEEP_TIME=100
+PROCESS_INTERVAL=5000
+```
 
 ## Usage
 
-### Local Development
+### Running the Service
 
-1. Copy the environment example file:
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+npm start
+```
 
-2. Edit the `.env` file with your configuration
+### Testing
 
-3. Install dependencies:
-   ```bash
-   npm install
-   ```
+The service includes multiple testing options:
 
-4. Start the service:
-   ```bash
-   npm start
-   ```
+#### Jest Tests
 
-### Docker
+```bash
+# Run all Jest tests
+npm test
 
-1. Build the Docker image:
-   ```bash
-   npm run docker:build
-   ```
+# Run with coverage
+npm run test:coverage
+```
 
-2. Run with Docker:
-   ```bash
-   npm run docker:run
-   ```
-
-### Docker Swarm
-
-1. Build the Docker image:
-   ```bash
-   npm run docker:build
-   ```
-
-2. Deploy to Docker Swarm:
-   ```bash
-   npm run stack:deploy
-   ```
-
-   Or manually:
-   ```bash
-   docker stack deploy -c docker-compose.yml evm-decoder
-   ```
+This runs basic tests on the log decoding functionality using the test data from `test-data.csv`.
 
 ## Database Schema
 
-The service creates a `logs` table with the following structure:
+The service creates and uses the following table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS logs (
-  id SERIAL PRIMARY KEY,
-  event_id INTEGER UNIQUE REFERENCES event(id),
-  block_number BIGINT,
-  transaction_hash TEXT,
-  log_index INTEGER,
-  address TEXT,
-  event_name TEXT,
-  decoded_data JSONB,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id SERIAL PRIMARY KEY,
+    event_id CHARACTER(23) UNIQUE REFERENCES event(id),
+    block_number BIGINT,
+    address TEXT,
+    event_name TEXT,
+    abi TEXT,
+    args JSONB
 );
 ```
-
-The table includes indexes for efficient querying:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_logs_block_number ON logs(block_number);
-CREATE INDEX IF NOT EXISTS idx_logs_address ON logs(address);
-CREATE INDEX IF NOT EXISTS idx_logs_event_name ON logs(event_name);
-```
-
-## License
-
-MIT
