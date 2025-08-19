@@ -9,8 +9,9 @@
     "test:coverage": "jest --coverage",
     "test:simple": "node tests/run-tests.js",
     "lint": "eslint .",
-    "docker:build": "docker build -t galacticcouncil/evm-log-decoder-service .",
-    "docker:push": "docker push galacticcouncil/evm-log-decoder-service",
+    "docker:build": "docker build -t
+    galacticcouncil/evm-log-decoder-service:latest .",
+    "docker:push": "docker push galacticcouncil/evm-log-decoder-service:latest",
     "stack:deploy": "docker stack deploy -c docker-compose.yml evm-decoder"
   },
   "dependencies": {
