@@ -563,8 +563,8 @@ class EVMLogDecoderService {
   ) {
     const query = `
         INSERT INTO logs (
-            event_id, block_number, args
-        ) VALUES ($1, $2, $3)
+            event_id, block_number, args, address
+        ) VALUES ($1, $2, $3, $4)
             ON CONFLICT (event_id) DO NOTHING
     `;
 
@@ -574,7 +574,8 @@ class EVMLogDecoderService {
     const values = [
       eventId,
       blockNumber,
-      JSON.stringify({ unparsed: true, raw: eventData })
+      JSON.stringify({ unparsed: true, raw: eventData }),
+      eventData && eventData.log ? eventData.log.address?.toLowerCase() : null
     ];
 
     await this.client.query(query, values);
